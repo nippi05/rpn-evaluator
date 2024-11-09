@@ -7,38 +7,40 @@ pub fn main() !void {
     defer assert(gpa_impl.deinit() == .ok);
     const gpa = gpa_impl.allocator();
 
-    var inputs = std.ArrayList([]const u8).init(gpa);
-    defer inputs.deinit();
-    var arg_iterator = try std.process.argsWithAllocator(gpa);
-    _ = arg_iterator.next(); // Program path
-    while (arg_iterator.next()) |arg| {
-        try inputs.append(arg);
+    const args = try std.process.argsAlloc(gpa);
+    defer std.process.argsFree(gpa, args);
+    if (args.len < 2) {
+        return error.ExpectedExpression;
     }
 
-    const result = try evaluateRPN(gpa, inputs.items);
-    std.debug.print("The result is: {}", .{result});
+    const result = try evaluateRPN(gpa, args[1..]);
+    const stdout = std.io.getStdOut().writer();
+    try stdout.print("{}\n", .{result});
 }
 
-fn evaluateRPN(gpa: std.mem.Allocator, input: [][]const u8) !f64 {
+fn evaluateRPN(gpa: std.mem.Allocator, input: [][]const u8) error{ InvalidOperator, NonTerminating, InvalidNumber, InvalidExpression, OutOfMemory }!f64 {
     var stack = std.ArrayList(f64).init(gpa);
     defer stack.deinit();
     for (input) |entry| {
-        std.debug.print("Current entry: \"{s}\"", .{entry});
-        assert(entry.len > 0);
-        if (std.ascii.isDigit(entry[0])) {
-            const number = try std.fmt.parseFloat(f64, entry);
+        assert(entry.len > 0); // argsAlloc asserts this
+        if (std.ascii.isDigit(entry[0]) or entry[0] == '-') {
+            const number = std.fmt.parseFloat(f64, entry) catch return error.InvalidNumber;
             try stack.append(number);
             continue;
         }
         // If it isn't a digit it's a operator + - / *
-        assert(entry.len == 1);
-        const operator = asOperator(entry[0]);
-        const second = stack.pop();
-        const first = stack.pop();
+        if (entry.len != 1) {
+            return error.InvalidOperator;
+        }
+        const operator = try Operator.from(entry[0]);
+        const second = stack.popOrNull() orelse return error.InvalidExpression;
+        const first = stack.popOrNull() orelse return error.InvalidExpression;
         const result = operator.operate(first, second);
         try stack.append(result);
     }
-    assert(stack.items.len == 1);
+    if (stack.items.len != 1) {
+        return error.NonTerminating;
+    }
     return stack.items[0];
 }
 
@@ -56,14 +58,14 @@ const Operator = enum {
             .over => first / second,
         };
     }
-};
 
-fn asOperator(char: u8) Operator {
-    return switch (char) {
-        '+' => .plus,
-        '-' => .minus,
-        '*' => .times,
-        '/' => .over,
-        else => unreachable,
-    };
-}
+    fn from(char: u8) !Operator {
+        return switch (char) {
+            '+' => .plus,
+            '-' => .minus,
+            'x' => .times,
+            '/' => .over,
+            else => return error.InvalidOperator,
+        };
+    }
+};
